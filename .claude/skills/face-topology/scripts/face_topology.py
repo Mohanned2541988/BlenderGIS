@@ -16,6 +16,7 @@ Occlusion is handled with a z-buffer so 3/4 views look right.
 Usage:
     python face_topology.py INPUT [-o OUTPUT] [--style clay|photo]
                             [--density 1.0] [--crop] [--no-fill] [--no-grid]
+                            [--obj OUT.obj]
 """
 import argparse
 import json
@@ -281,18 +282,17 @@ class FaceFit:
         zf = np.where(self.cover, zb, 1e9).astype(np.float32)
         self.zb_near = cv2.erode(zf, np.ones((7, 7), np.uint8))
 
-    def map(self, uvpts):
-        """UV points -> (image xy, visible mask)."""
+    def lift(self, uvpts):
+        """UV points -> (image-space xyz, mapped mask), ignoring occlusion."""
         uvpts = np.asarray(uvpts, np.float64)
         px = np.round(to_px(uvpts)).astype(int)
         ok = (px[:, 0] >= 0) & (px[:, 0] < UV_RES) & (px[:, 1] >= 0) & (px[:, 1] < UV_RES)
         t = np.full(len(uvpts), -1)
         t[ok] = self.uv_ids[px[ok, 1], px[ok, 0]]
         ok &= t >= 0
-        out = np.zeros((len(uvpts), 2))
-        vis = np.zeros(len(uvpts), bool)
+        out = np.zeros((len(uvpts), 3))
         if not ok.any():
-            return out, vis
+            return out, ok
         tri = self.tris[t[ok]]
         A, B, Cc = self.uv[tri[:, 0]], self.uv[tri[:, 1]], self.uv[tri[:, 2]]
         q = uvpts[ok]
@@ -303,15 +303,23 @@ class FaceFit:
         w2 = (v0[:, 0] * v2[:, 1] - v2[:, 0] * v0[:, 1]) / den
         w0 = 1 - w1 - w2
         P = self.p
-        xyz = (w0[:, None] * P[tri[:, 0]] + w1[:, None] * P[tri[:, 1]]
-               + w2[:, None] * P[tri[:, 2]])
-        out[ok] = xyz[:, :2]
-        xi = np.clip(np.round(xyz[:, 0]).astype(int), 0, self.W - 1)
-        yi = np.clip(np.round(xyz[:, 1]).astype(int), 0, self.H - 1)
+        out[ok] = (w0[:, None] * P[tri[:, 0]] + w1[:, None] * P[tri[:, 1]]
+                   + w2[:, None] * P[tri[:, 2]])
+        return out, ok
+
+    def map(self, uvpts):
+        """UV points -> (image xy, visible mask)."""
+        xyz, ok = self.lift(uvpts)
+        vis = np.zeros(len(xyz), bool)
+        if not ok.any():
+            return xyz[:, :2], vis
+        xyz_ok = xyz[ok]
+        xi = np.clip(np.round(xyz_ok[:, 0]).astype(int), 0, self.W - 1)
+        yi = np.clip(np.round(xyz_ok[:, 1]).astype(int), 0, self.H - 1)
         tol = 0.012 * self.face_size()
         zn = self.zb_near[yi, xi]
-        vis[ok] = (zn < 1e8) & (xyz[:, 2] <= zn + tol)
-        return out, vis
+        vis[ok] = (zn < 1e8) & (xyz_ok[:, 2] <= zn + tol)
+        return xyz[:, :2], vis
 
     def face_size(self):
         xy = self.p[:, :2]
@@ -400,6 +408,166 @@ def draw_face(canvas, line_layer, accent_layer, fit, zones, zmask, uv_rgba,
             stroke(line_layer, polylines_from(fit, sp), th)
 
 
+# ---------------------------------------------------------------- 3D export
+FACE_HEIGHT_M = 0.22      # forehead-to-chin size of the exported head, metres
+TOPO_OFFSET_M = 0.0012    # float the topology just above the surface
+
+
+class ObjWriter:
+    """Minimal Wavefront writer: Y up, face looking towards +Z, which is the
+    front view (Numpad 1) with Blender's default OBJ import axes."""
+
+    def __init__(self):
+        self.lines, self.nv, self.nvt = [], 0, 0
+
+    def obj(self, name):
+        self.lines.append(f"o {name}")
+
+    def verts(self, xyz):
+        self.lines += [f"v {x:.5f} {y:.5f} {z:.5f}" for x, y, z in xyz]
+        base, self.nv = self.nv + 1, self.nv + len(xyz)
+        return base
+
+    def uvs(self, uv):
+        self.lines += [f"vt {u:.5f} {v:.5f}" for u, v in uv]
+        base, self.nvt = self.nvt + 1, self.nvt + len(uv)
+        return base
+
+    def face(self, vs, vts=None, mat=None):
+        if mat is not None and mat != getattr(self, "_mat", None):
+            self.lines.append(f"usemtl {mat}")
+            self._mat = mat
+        if vts is None:
+            self.lines.append("f " + " ".join(str(v) for v in vs))
+        else:
+            self.lines.append("f " + " ".join(f"{v}/{t}" for v, t in zip(vs, vts)))
+
+    def obj_reset(self):
+        self._mat = None
+
+
+def color_name(col):
+    if col is None:
+        return "topo_base"
+    return "topo_" + next(k for k, v in C.items() if tuple(v) == tuple(col))
+
+
+def export_obj(path, img, fits, zones, uv_rgba, zmask, step):
+    """Write <path> (+ .mtl and the photo texture) with, per face:
+    Face<N>_Surface  - the fitted head surface textured with the photo
+    Face<N>_Topology - the edge-loop / quad-grid layout as real quads,
+                       one material per colour zone."""
+    base = os.path.splitext(path)[0]
+    tex = base + "_photo.png"
+    cv2.imwrite(tex, img)
+    H, W = img.shape[:2]
+
+    w = ObjWriter()
+    w.lines.append(f"mtllib {os.path.basename(base)}.mtl")
+    for n, fit in enumerate(fits, 1):
+        P = fit.p
+        center = P.mean(0)
+        s = FACE_HEIGHT_M / (P[:, 1].max() - P[:, 1].min())
+
+        def world(xyz, lift=0.0):
+            q = (np.asarray(xyz) - center) * s
+            return np.stack([q[:, 0], -q[:, 1], -q[:, 2] + lift], 1)
+
+        # --- textured surface
+        w.obj(f"Face{n}_Surface"); w.obj_reset()
+        vb = w.verts(world(P))
+        tb = w.uvs(np.stack([P[:, 0] / W, 1 - P[:, 1] / H], 1))
+        for a, b, c in fit.tris:
+            w.face([vb + a, vb + b, vb + c], [tb + a, tb + b, tb + c], "photo")
+
+        # --- topology quads
+        w.obj(f"Face{n}_Topology"); w.obj_reset()
+        faces = []                     # (vertex-index list, material)
+        pts = []
+
+        def add_pts(uvpts):
+            xyz, ok = fit.lift(uvpts)
+            start = len(pts)
+            pts.extend(xyz)
+            idx = np.arange(start, start + len(xyz))
+            return np.where(ok, idx, -1)
+
+        rim_uv, rim_idx = [], []       # zone border vertices, for stitching
+        for z in zones:
+            ns = len(z.inner)
+            rings = [add_pts(r) for r in z.rings]
+            rim_uv.append(z.rings[-1][rings[-1] >= 0])
+            rim_idx.append(rings[-1][rings[-1] >= 0])
+            for i in range(len(rings) - 1):
+                a, b = rings[i], rings[i + 1]
+                for k in range(ns):
+                    k2 = (k + 1) % ns
+                    q = [a[k], b[k], b[k2], a[k2]]
+                    if min(q) < 0:
+                        continue
+                    mid = (z.rings[i][k] + z.rings[i][k2]
+                           + z.rings[i + 1][k] + z.rings[i + 1][k2]) / 4
+                    faces.append((q, color_name(z.band_color(i, mid))))
+            if z.inner_color is not None and not z.accent and min(rings[0]) >= 0:
+                faces.append((list(rings[0]), color_name(z.inner_color)))
+            elif z.inner_color is not None:
+                # mouth: two lip bands from the lip opening out to the lip edge
+                lip = resample_closed(fit.uv[LIPS_INNER], ns)
+                lrings = [add_pts(lip), add_pts((lip + z.inner) / 2), rings[0]]
+                for a, b in zip(lrings[:-1], lrings[1:]):
+                    for k in range(ns):
+                        q = [a[k], b[k], b[(k + 1) % ns], a[(k + 1) % ns]]
+                        if min(q) >= 0:
+                            faces.append((q, color_name(z.inner_color)))
+
+        g = np.arange(0, 1.0001, step)
+        gu, gv = np.meshgrid(g, g)
+        corners = np.stack([gu.ravel(), gv.ravel()], 1)
+        cidx = add_pts(corners).reshape(len(g), len(g))
+        cpx = np.round(to_px(corners)).astype(int).clip(0, UV_RES - 1)
+        in_zone = zmask[cpx[:, 1], cpx[:, 0]] > 0
+        # grid corners that fall inside a zone snap onto the nearest vertex of
+        # that zone's outer loop, so the grid welds onto the edge loops
+        rim_uv, rim_idx = np.vstack(rim_uv), np.concatenate(rim_idx)
+        for k in np.flatnonzero(in_zone & (cidx.ravel() >= 0)):
+            d = np.sum((rim_uv - corners[k]) ** 2, 1)
+            cidx.flat[k] = rim_idx[np.argmin(d)]
+        for j in range(len(g) - 1):
+            for i in range(len(g) - 1):
+                cu, cv_ = (g[i] + g[i + 1]) / 2, (g[j] + g[j + 1]) / 2
+                px = np.round(to_px([[cu, cv_]])[0]).astype(int)
+                if zmask[px[1], px[0]]:
+                    continue
+                q = [cidx[j, i], cidx[j, i + 1], cidx[j + 1, i + 1], cidx[j + 1, i]]
+                if min(q) < 0:
+                    continue
+                q = [v for n_, v in enumerate(q) if v != q[n_ - 1]]
+                if len(set(q)) < 3:
+                    continue
+                rgba = uv_rgba[px[1], px[0]]
+                col = None
+                if rgba[3] > 0.5:
+                    col = min(C.values(), key=lambda c: np.sum(
+                        (np.array(c) / 255 - rgba[:3]) ** 2))
+                faces.append((q, color_name(col)))
+
+        # keep only the vertices the quads use
+        used = sorted({v for q, _ in faces for v in q})
+        remap = {v: i for i, v in enumerate(used)}
+        vb = w.verts(world(np.array(pts)[used], TOPO_OFFSET_M))
+        for q, mat in sorted(faces, key=lambda f: f[1]):
+            w.face([vb + remap[v] for v in q], mat=mat)
+
+    with open(path, "w") as f:
+        f.write("# face-topology export\n" + "\n".join(w.lines) + "\n")
+    with open(base + ".mtl", "w") as f:
+        f.write(f"newmtl photo\nKd 1 1 1\nKs 0 0 0\nmap_Kd {os.path.basename(tex)}\n\n")
+        f.write("newmtl topo_base\nKd 0.8 0.8 0.8\nKs 0 0 0\n\n")
+        for k, (r, g_, b) in C.items():
+            f.write(f"newmtl topo_{k}\nKd {r/255:.3f} {g_/255:.3f} {b/255:.3f}\nKs 0 0 0\n\n")
+    return path
+
+
 def grid_step(density):
     return 1.0 / round(32 * density)
 
@@ -452,6 +620,8 @@ def main():
     ap.add_argument("--crop", action="store_true",
                     help="crop to the face(s) and upscale for a close-up")
     ap.add_argument("--max-faces", type=int, default=5)
+    ap.add_argument("--obj", metavar="OUT.obj",
+                    help="also export a 3D head + topology mesh for Blender")
     args = ap.parse_args()
 
     img = cv2.imread(args.input, cv2.IMREAD_COLOR)
@@ -491,9 +661,15 @@ def main():
     canvas = clay(img) if args.style == "clay" else img.astype(np.float32)
     lines = np.zeros((H, W), np.uint8)
     accent = np.zeros((H, W), np.uint8)
+    fits = []
     for P in Ps:
         fit = FaceFit(P, uv, tris, (H, W))
         draw_face(canvas, lines, accent, fit, zones, zmask, uv_rgba, args)
+        fits.append(fit)
+    if args.obj:
+        export_obj(args.obj, img, fits, zones, uv_rgba, zmask,
+                   grid_step(args.density))
+        print(f"3D mesh -> {args.obj}")
 
     la = (lines.astype(np.float32) / 255 * args.line_alpha)[..., None]
     canvas = canvas * (1 - la) + np.array([38, 38, 42]) * la

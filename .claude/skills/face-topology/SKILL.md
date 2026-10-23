@@ -46,8 +46,29 @@ Options:
 | `--line-alpha 0.7` | wire opacity |
 | `--no-fill` / `--no-grid` | wireframe only / edge loops only |
 | `--max-faces 5` | how many faces to process |
+| `--obj OUT.obj` | also export a 3D head + topology mesh for Blender (see below) |
 
 Output defaults to `<input>_topology.png` next to the input.
+
+## 3D export for Blender (`--obj`)
+
+```bash
+python .claude/skills/face-topology/scripts/face_topology.py PHOTO --crop --obj head.obj
+```
+
+writes `head.obj`, `head.mtl` and `head_photo.png` (keep them together).
+Per detected face the OBJ holds two objects, sized to a real head (~22 cm):
+
+- `Face<N>_Surface` - the 468-vertex face shape fitted to the photo,
+  textured with the photo. Use it as the snapping target.
+- `Face<N>_Topology` - the edge loops and quad grid as real quads (welded
+  where the grid meets the loops), floating 1.2 mm above the surface, with
+  one material per colour zone (`topo_lips`, `topo_orbit`, ...).
+
+In Blender: **File > Import > Wavefront (.obj)** with default axes, then
+Numpad 1 for the front view. Switch the viewport to Material Preview to see
+the photo and zone colours. Depth comes from a single photo, so treat the
+shape as a starting point, not a scan.
 
 ## Workflow for an uploaded photo
 
@@ -57,7 +78,8 @@ Output defaults to `<input>_topology.png` next to the input.
 3. Look at the result. If the face is tiny or the mesh looks crowded, re-run
    with `--density 0.8`; if the user wants their skin tones kept, use
    `--style photo`.
-4. Send the PNG to the user.
+4. Send the PNG to the user. If they want it in Blender / 3D, add
+   `--obj` and send the `.obj`, `.mtl` and `_photo.png` together.
 
 If the script reports "No face detected", the photo has no real, reasonably
 visible face (fully side-on profiles, heavy occlusion, stylised drawings or
