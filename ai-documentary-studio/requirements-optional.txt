@@ -1,0 +1,3 @@
+# The app itself needs only the Python standard library + FFmpeg.
+# Optional: Claude (scriptwriting, translation, research brief, web search)
+anthropic>=2.3.0
