@@ -184,3 +184,22 @@ class SmokeRender(TempHome):
         with self.assertRaises(render.RenderConflict):
             render.render(p, {"quality": "draft", "preset": "square"}, st)
         self.assertEqual(list((p.root / "timeline").glob("render_*")), [])  # intermediates cleaned
+
+
+@needs_ffmpeg
+class AutopilotOffline(TempHome):
+    """With no AI provider, Autopilot still produces a complete, renderable project and says why it is a draft."""
+
+    def test_topic_only(self):
+        from studio import autopilot, config
+        r = autopilot.run({"topic": "The Aral Sea", "target_duration": 20, "aspect_ratio": "16:9",
+                           "quality": "draft"}, config.load_settings())
+        self.assertFalse(r["ai_script"])
+        self.assertTrue(any("placeholder" in n for n in r["notes"]))
+        self.assertTrue(r["render"])
+        from studio import projects
+        p = projects.get_project(r["project_id"])
+        self.assertEqual(p.meta["aspect_ratio"], "16:9")
+        self.assertTrue(all(s["media"]["visual_asset_id"] and s["storyboard"]["image_prompt"] for s in p.scenes()))
+        with self.assertRaises(ValueError):
+            autopilot.run({"topic": "  "}, config.load_settings())

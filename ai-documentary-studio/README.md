@@ -32,6 +32,26 @@ App settings and logs live in `~/Library/Application Support/AI Documentary Stud
 
 ## 2. Your first documentary
 
+**Fastest: Autopilot.** On the Projects page, type a topic (Arabic or English), choose length and format, and
+press **Generate documentary**. One background job then:
+
+1. plans the project (bilingual title, main question, audience, tone, visual style, search queries),
+2. searches the web for sources (Claude web search; results added as *unreviewed*),
+3. extracts claims from those sources (always *unverified*; claims without a real source are dropped),
+4. writes the Arabic narration + English translation, restricted to those sources,
+5. builds the storyboard and image/video prompts,
+6. creates textured background visuals per scene and adds title / statistic / end cards,
+7. records Arabic narration (macOS Arabic voice if installed, otherwise silent placeholder),
+8. times Arabic and English subtitles to the narration,
+9. renders the MP4 and opens the Export page.
+
+Everything stays editable, and the finished job lists what still needs a human (fact-checking, real images,
+voice). **Fully automatic writing and research need an AI provider**: a Claude API key (script + web research)
+or Ollama (free, local; script only, no web search). Without one, Autopilot still produces a complete,
+renderable project, but the narration is placeholder text for you to write.
+
+**Step by step:**
+
 1. **Projects → Create sample project** builds a 25-second demo (original generated visuals, Arabic narration via
    the macOS Arabic voice if installed, bilingual subtitles, music bed). Open **Timeline** or **Export** to render it.
 2. **New Documentary** — the wizard asks for title, topic, main question, audience, platform, aspect ratio
@@ -88,6 +108,7 @@ ai-documentary-studio/
     graphics.py      title/chapter/lower-third/quote/source/timeline/map/statistic/end cards (ASS)
     render.py        timeline maths, validation, FFmpeg command builders, render pipeline
     workflows.py     TTS per scene, cues from script, transcription, translation, subtitle export
+    autopilot.py     topic → finished documentary pipeline
     jobs.py          background jobs with progress / ETA / cancel
     sample.py        sample project generator
     providers/       llm.py (template, Claude, Ollama), speech.py (mock, macOS say, whisper.cpp),
@@ -147,14 +168,14 @@ and a cost note. Nothing is sent anywhere unless you select a cloud provider **a
 ## 6. Tests
 
 ```bash
-./scripts/run_tests.sh      # unit + integration tests (46 tests; Claude adapter tests skip without the SDK)
+./scripts/run_tests.sh      # unit + integration tests (48 tests; Claude adapter tests skip without the SDK)
 ./scripts/smoke_test.sh     # builds the sample in a temp folder and renders a real MP4 with local tools only
 ```
 
 Results from the development run (Linux container, FFmpeg 6.1.1):
 
-* `run_tests.sh`: **46 tests, all passing** with the `anthropic` SDK installed (43 pass + 3 skipped without it),
-  on Python 3.13 and 3.9.25.
+* `run_tests.sh`: **48 tests, all passing** with the `anthropic` SDK installed (44 pass + 4 skipped without it).
+  Includes Autopilot topic → rendered video, both offline and through the Claude adapter against a fake API.
 * `smoke_test.sh`: **passed** — sample rendered to a 25 s 1080×1920 H.264/AAC MP4.
 * Full HTTP workflow (create → script → reorder/duplicate/delete → storyboard → research & warnings → upload &
   import media → mock TTS → subtitles → edit cues → export SRT/VTT/CSV → validate → render with crossfades and
@@ -169,6 +190,7 @@ refusal handling, citation filtering) — but not against the real services.
 
 ## 7. Implemented features
 
+* Autopilot: topic → planned, researched, scripted, storyboarded, voiced, subtitled and rendered project.
 * Projects: create (wizard), open, autosave, duplicate, rename, package (.zip), export metadata (JSON),
   completion status, missing-file detection, versioned schema with migrations, crash-safe storage.
 * Research: sources with review status, claims with 5 statuses + supporting/conflicting sources, notes,

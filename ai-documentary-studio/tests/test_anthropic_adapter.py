@@ -22,6 +22,7 @@ def message(content, stop="end_turn"):
 class Fake(BaseHTTPRequestHandler):
     requests = []
     reply = None
+    router = None
 
     def log_message(self, *a):
         pass
@@ -29,7 +30,8 @@ class Fake(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         Fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
-        data = json.dumps(Fake.reply).encode()
+        reply = Fake.router(body) if Fake.router else Fake.reply
+        data = json.dumps(reply).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -47,6 +49,7 @@ class AnthropicAdapter(TempHome):
         os.environ["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{self.srv.server_address[1]}"
         os.environ["ANTHROPIC_API_KEY"] = "test-key"
         Fake.requests.clear()
+        Fake.router = None
 
     def tearDown(self):
         self.srv.shutdown()
@@ -101,3 +104,59 @@ class AnthropicAdapter(TempHome):
         self.assertEqual([r["url"] for r in out], ["https://real.example/a"])
         self.assertEqual(out[0]["summary"], "Says A.")
         self.assertEqual(Fake.requests[-1]["body"]["tools"][0]["type"], "web_search_20260209")
+
+
+    def test_autopilot_topic_to_video(self):
+        """Topic in -> planned, researched, scripted, voiced, subtitled, rendered project out."""
+        import shutil
+        if not shutil.which("ffmpeg"):
+            self.skipTest("FFmpeg not installed")
+        from studio import autopilot
+
+        def route(body):
+            system = json.dumps(body.get("system", ""))
+            user = json.dumps(body["messages"][0]["content"], ensure_ascii=False)
+            if body.get("tools"):
+                return message([
+                    {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}},
+                    {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                        {"type": "web_search_result", "url": "https://real.example/aral", "title": "Aral Sea",
+                         "encrypted_content": "e", "page_age": "2023"}]},
+                    {"type": "text", "text": json.dumps([{"url": "https://real.example/aral", "title": "Aral Sea",
+                                                         "summary": "The lake shrank after rivers were diverted."}])}])
+            if "plan short documentary" in system:
+                return message([{"type": "text", "text": json.dumps({
+                    "title_en": "The Vanishing Sea", "title_ar": "البحر الذي اختفى", "main_question": "Why did it shrink?",
+                    "audience": "Students", "tone": "calm", "visual_style": "archival_investigation",
+                    "queries": ["Aral Sea shrinking causes"]})}])
+            if "extract checkable factual claims" in system:
+                sid = user.split("id=")[1].split(" ")[0]
+                return message([{"type": "text", "text": json.dumps([
+                    {"text": "The Aral Sea shrank after its rivers were diverted.", "source_ids": [sid]},
+                    {"text": "Invented claim with no source.", "source_ids": ["src_fake"]}])}])
+            sid = user.split("id=")[1].split(" ")[0]
+            return message([{"type": "text", "text": json.dumps({"scenes": [
+                {"title": "Hook", "purpose": "hook", "narration_ar": "كان هنا بحر كامل.", "narration_en": "A whole sea was here.",
+                 "on_screen_text": "", "transition": "cut", "factual": False},
+                {"title": "Cause", "purpose": "evidence", "narration_ar": "حُوّلت مياه الأنهار للزراعة.",
+                 "narration_en": "River water was diverted for farming.", "on_screen_text": "1960",
+                 "source_ids": [sid], "transition": "crossfade", "factual": True},
+                {"title": "End", "purpose": "conclusion", "narration_ar": "فماذا نتعلم؟", "narration_en": "So what do we learn?",
+                 "transition": "cut", "factual": False}]})}])
+
+        Fake.router = route
+        st = self.settings()
+        r = autopilot.run({"topic": "Aral Sea", "target_duration": 20, "aspect_ratio": "1:1", "quality": "draft",
+                           "web_search": True}, st)
+        self.assertTrue(r["ai_script"])
+        self.assertEqual((r["sources"], r["claims"], r["scenes"]), (1, 1, 3))  # invented claim dropped
+        from studio import projects
+        p = projects.get_project(r["project_id"])
+        self.assertEqual(p.meta["title"], "البحر الذي اختفى — The Vanishing Sea")
+        self.assertEqual(p.meta["visual_style"], "archival_investigation")
+        self.assertTrue(all(c["status"] == "unverified" for c in p.db.list("claim")))
+        self.assertTrue(all(s["media"]["visual_asset_id"] and s["media"]["narration_asset_id"] for s in p.scenes()))
+        self.assertEqual(p.scenes()[0]["card"]["type"], "title")
+        self.assertEqual(p.scenes()[1]["card"]["type"], "statistic")
+        self.assertTrue(p.db.list("cue"))
+        self.assertTrue(r["render"] and __import__("os").path.exists(r["render"]["output"]))

@@ -215,13 +215,14 @@ VIEWS.projects = async (v) => {
      h("button", { onclick: () => location.hash = "#/new" }, "+ " + t("nav_new", "New Documentary"))]));
   if (!S.status.ffmpeg.available) v.append(h("div", { class: "card hl", style: { marginBottom: "14px" } },
     h("strong", {}, "FFmpeg is missing. "), "Install it with ", h("code", {}, "brew install ffmpeg"), " then restart the app. Import and rendering need it."));
+  v.append(autopilotCard());
   if (!list.length) { v.append(h("div", { class: "empty" }, "No projects yet. Create your first documentary.")); return; }
   const grid = h("div", { class: "grid cols-auto" });
   for (const p of list) {
     const active = S.pid === p.id;
     grid.append(h("div", { class: `card collage ${active ? "hl" : ""}` },
       h("div", { class: "kicker" }, new Date(p.updated * 1000).toLocaleString()),
-      h("h2", { style: { margin: "6px 0 4px" }, dir: "auto" }, p.title),
+      h("h2", { style: { margin: "6px 0 4px" } }, p.title.split(" — ").map(part => h("div", { dir: "auto" }, part))),
       p.error ? h("div", { class: "badge err" }, p.error) : null,
       h("div", { class: "muted small", style: { wordBreak: "break-all" } }, p.path),
       h("div", { class: "row", style: { marginTop: "12px" } },
@@ -247,6 +248,40 @@ VIEWS.projects = async (v) => {
   v.append(h("p", { class: "hint", style: { marginTop: "16px" } },
     "Projects folder: ", S.status.projects_dir, ". To delete a project, move its folder to the Trash in Finder (the app never deletes projects itself)."));
 };
+
+function autopilotCard() {
+  const st = S.status;
+  const ai = st.llm_is_ai && st.llm_ready;
+  const topic = h("input", { placeholder: "e.g. Why the Aral Sea disappeared · لماذا اختفى بحر آرال", dir: "auto", style: { fontSize: "16px" } });
+  const dur = select([["30", "30 s"], ["60", "60 s"], ["90", "90 s"], ["180", "3 min"], ["300", "5 min"]], "60", () => {}, { style: { maxWidth: "110px" } });
+  const asp = select([["9:16", "Vertical 9:16"], ["16:9", "Landscape 16:9"], ["1:1", "Square 1:1"]], "9:16", () => {}, { style: { maxWidth: "160px" } });
+  const qual = select([["draft", "Fast draft"], ["standard", "Standard quality"]], "standard", () => {}, { style: { maxWidth: "170px" } });
+  const canSearch = st.llm === "anthropic" && st.llm_ready;
+  const search = h("input", { type: "checkbox", checked: canSearch, disabled: !canSearch });
+  const go = async () => {
+    if (!topic.value.trim()) { topic.focus(); return toast("Enter a topic first.", "err"); }
+    try {
+      runJob(await api("POST", "/api/autopilot", { topic: topic.value.trim(), target_duration: Number(dur.value), aspect_ratio: asp.value,
+        quality: qual.value, web_search: search.checked, render: true }), async (r) => {
+        toast(`Documentary ready: ${r.scenes} scenes, ${r.sources} sources, ${r.claims} claims, voice: ${r.voice}.` + (r.notes.length ? "\n\n" + r.notes.join("\n") : ""), r.ai_script ? "ok" : "");
+        await openProject(r.project_id, "export");
+      });
+    } catch (e) { fail(e); }
+  };
+  topic.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  return h("div", { class: "card hl collage", style: { marginBottom: "18px" } },
+    h("div", { class: "kicker" }, "Autopilot"),
+    h("h2", { style: { marginTop: "4px" } }, "Type a topic — get a finished documentary"),
+    h("p", { class: "muted small", style: { marginTop: 0 } }, "Plans the project, researches sources, writes the Arabic script with English translation, builds the storyboard, visuals, narration and bilingual subtitles, and renders the video. Everything stays editable afterwards."),
+    h("div", { class: "row" }, h("div", { style: { flex: "1 1 320px" } }, topic), dur, asp, qual, h("button", { onclick: go }, "✦ Generate documentary")),
+    h("div", { class: "row small", style: { marginTop: "10px" } },
+      h("span", { class: `badge ${ai ? "ok" : "warn"}` }, ai ? `Script: ${st.llm} ✓` : "Script: placeholders only"),
+      h("label", { style: { display: "inline-flex", gap: "6px", alignItems: "center", margin: 0 } }, search, canSearch ? "Search the web for sources (Claude)" : "Web research needs Claude"),
+      h("span", { class: "badge" }, `Voice: ${st.tts === "mock" ? (st.is_mac ? "macOS Arabic voice if installed" : "silent placeholder") : st.tts}`)),
+    ai ? null : h("p", { class: "small", style: { color: "var(--accent)", marginBottom: 0 } },
+      "No AI language model is set up, so the script will be editable placeholders. For fully automatic writing, add a Claude API key or install Ollama in ",
+      h("a", { href: "#/settings", style: { color: "var(--accent)" } }, "Settings"), "."));
+}
 
 VIEWS.new = async (v) => {
   const W = S.wizard, d = W.data;
@@ -285,7 +320,8 @@ VIEWS.new = async (v) => {
         "Providers are configured in Settings. Nothing is sent to an external service unless you enable it there."),
     ]],
   ];
-  v.append(header("02 · Wizard", t("nav_new", "New Documentary"), "The project is created and saved as soon as you press Create."));
+  v.append(header("02 · Wizard", t("nav_new", "New Documentary"), "Use Autopilot for a one-step documentary, or the wizard below to set every detail yourself."));
+  v.append(autopilotCard());
   v.append(h("div", { class: "steps" }, pages.map(([n], i) => h("span", { class: i === W.step ? "on" : "" }, `${i + 1}. ${n}`))));
   const card = h("div", { class: "card", style: { maxWidth: "760px" } }, pages[W.step][1]());
   const nav = h("div", { class: "row", style: { marginTop: "18px" } },

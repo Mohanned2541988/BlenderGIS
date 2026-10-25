@@ -72,6 +72,8 @@ def h_status(req, q, body):
     return {"app": APP_NAME, "version": APP_VERSION, "ffmpeg": media.ffmpeg_features(),
             "ffprobe": bool(media.which("ffprobe")), "projects_dir": str(config.projects_dir()),
             "is_mac": config.IS_MAC, "llm": get_llm(s).name, "llm_is_ai": get_llm(s).is_ai,
+            "llm_ready": get_llm(s).available(s)[0], "search": s["providers"].get("search"),
+            "tts": get_tts(s).name,
             "visual_styles": {k: v["label"] for k, v in storyboard.STYLES.items()},
             "purposes": storyboard.PURPOSES, "card_types": CARD_TYPES, "aspects": list(ASPECTS),
             "motions": list(render.MOTION), "presets": render.PRESETS, "jobs": JOBS.active()}
@@ -124,6 +126,14 @@ def h_sample(req, q, body):
         proj, voiced = sample.build()
         return {"id": proj.id, "voiced": voiced}
     return JOBS.start("sample", None, run).to_dict()
+
+
+def h_autopilot(req, q, body):
+    from . import autopilot
+    if not (body.get("topic") or "").strip():
+        raise ApiError(400, "Enter a topic")
+    s = _settings()
+    return JOBS.start("autopilot", None, lambda j: autopilot.run(body, s, j)).to_dict()
 
 
 def h_projects(req, q, body):
@@ -627,6 +637,7 @@ ROUTES = [
     ("GET", r"/api/projects", h_projects),
     ("POST", r"/api/projects", h_project_create),
     ("POST", r"/api/sample", h_sample),
+    ("POST", r"/api/autopilot", h_autopilot),
     ("GET", r"/api/projects/([^/]+)", h_project),
     ("PATCH", r"/api/projects/([^/]+)", h_project_patch),
     ("POST", r"/api/projects/([^/]+)/duplicate", h_project_dup),
